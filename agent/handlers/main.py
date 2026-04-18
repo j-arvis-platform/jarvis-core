@@ -21,6 +21,8 @@ from agent.integrations.sms import TwilioSMSClient
 from agent.integrations.sms import build_from_env as build_sms_from_env
 from agent.integrations.telegram import TelegramBot, TelegramError
 from agent.integrations.telegram import build_from_env as build_telegram_from_env
+from agent.integrations.legifrance import LegifranceClient
+from agent.integrations.legifrance import build_from_env as build_legifrance_from_env
 from agent.integrations.vapi import VapiClient
 from agent.integrations.vapi import build_from_env as build_vapi_from_env
 from agent.integrations.whatsapp import WhatsAppClient
@@ -119,6 +121,7 @@ class JarvisAgent:
         self._sms: TwilioSMSClient | None = None
         self._whatsapp: WhatsAppClient | None = None
         self._vapi: VapiClient | None = None
+        self._legifrance: LegifranceClient | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
 
     @property
@@ -229,6 +232,13 @@ class JarvisAgent:
         if self._vapi is None:
             self._vapi = build_vapi_from_env()
         return self._vapi
+
+    @property
+    def legifrance(self) -> LegifranceClient:
+        """Lazy-init du client PISTE Legifrance/JudiLibre."""
+        if self._legifrance is None:
+            self._legifrance = build_legifrance_from_env()
+        return self._legifrance
 
     def initiate_vapi_call(self, customer_number: str,
                            assistant_id: str | None = None,
