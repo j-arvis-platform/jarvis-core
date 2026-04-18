@@ -184,12 +184,86 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "name": "notify_admin_telegram",
         "description": (
             "Envoie un message Telegram a l'admin (Hamid). HTML supporte. "
-            "Utiliser pour alertes operationnelles critiques."
+            "A utiliser pour alertes operationnelles critiques uniquement."
         ),
         "input_schema": {
             "type": "object",
             "properties": {"text": {"type": "string"}},
             "required": ["text"],
+        },
+    },
+    {
+        "name": "send_sms_twilio",
+        "description": (
+            "Envoie un SMS via Twilio a un numero E.164 (+33XXXXXXXXX). "
+            "Canal PREMIUM (cout ~0,075 EUR/SMS). Anti-spam : 1 SMS max "
+            "par numero par 24h sauf 'urgence'=true. Body max 160 chars "
+            "(au-dela, split automatique facture en plusieurs SMS)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_number": {"type": "string"},
+                "body": {"type": "string"},
+                "urgence": {"type": "boolean", "default": False},
+            },
+            "required": ["to_number", "body"],
+        },
+    },
+    {
+        "name": "send_email_gmail",
+        "description": (
+            "Envoie un email transactionnel via Gmail Workspace SMTP. "
+            "Expediteur : contact@elexity34.fr automatiquement. "
+            "Anti-spam : 1 email max par destinataire par 24h. "
+            "Toujours fournir un body_html ; body_text est un fallback "
+            "pour clients mail sans HTML."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body_html": {"type": "string"},
+                "body_text": {"type": "string"},
+                "cc": {"type": "string"},
+            },
+            "required": ["to", "subject", "body_html"],
+        },
+    },
+    {
+        "name": "send_whatsapp_message",
+        "description": (
+            "Envoie un message WhatsApp texte libre a un client. REQUIERT "
+            "une fenetre 24h conversationnelle ouverte (le client doit "
+            "avoir ecrit dans les 24 dernieres heures). Hors fenetre : "
+            "utiliser send_whatsapp_template a la place. Si l'API renvoie "
+            "une erreur fenetre 24h, signale-le honnetement a l'utilisateur."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_number": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["to_number", "body"],
+        },
+    },
+    {
+        "name": "send_whatsapp_template",
+        "description": (
+            "Envoie un message WhatsApp via un template pre-approuve par "
+            "Meta. A utiliser hors fenetre 24h ou pour notifications "
+            "proactives. Le template doit exister dans Meta Business Suite."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_number": {"type": "string"},
+                "template_name": {"type": "string"},
+                "language": {"type": "string", "default": "fr"},
+            },
+            "required": ["to_number", "template_name"],
         },
     },
 ]
@@ -307,15 +381,134 @@ class ToolExecutor:
         resp.raise_for_status()
         return resp.json().get("data", resp.json())
 
-    # ---- Canaux ----
+    # ---- Canaux (sync pur — pas d'asyncio.run pour eviter conflit
+    #      avec l'event loop FastAPI quand respond() est appele depuis
+    #      un handler async). Les wrappers async dans agent/integrations/
+    #      restent utilisables ailleurs.
 
     def _tool_notify_admin_telegram(self, data: dict) -> dict:
-        # Import local pour eviter dependance au demarrage si non utilise
-        import asyncio
+        token = self.env["TELEGRAM_BOT_TOKEN_JARVIS"]
+        chat_id = self.env["TELEGRAM_CHAT_ID_ADMIN"]
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": data["text"],
+                  "parse_mode": "HTML"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if not payload.get("ok"):
+            return {"error": payload.get("description", "telegram_failed")}
+        return {"message_id": payload["result"]["message_id"]}
 
-        from agent.integrations.telegram import build_from_env
-        try:
-            bot = build_from_env(self.env)
-            return asyncio.run(bot.send_message(data["text"]))
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+    def _tool_send_sms_twilio(self, data: dict) -> dict:
+        sid = self.env["TWILIO_ACCOUNT_SID"]
+        token = self.env["TWILIO_AUTH_TOKEN"]
+        from_number = self.env["TWILIO_FROM_NUMBER"]
+        body = data["body"]
+        if len(body) > 160:
+            logger.warning("sms body=%d chars (>160, will split)", len(body))
+        resp = httpx.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            data={"To": data["to_number"], "From": from_number, "Body": body},
+            auth=(sid, token),
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            err = resp.json() if resp.content else {}
+            return {"error": f"HTTP {resp.status_code}",
+                    "detail": err.get("message")}
+        body_resp = resp.json()
+        return {"sid": body_resp.get("sid"),
+                "status": body_resp.get("status"),
+                "num_segments": body_resp.get("num_segments")}
+
+    def _tool_send_email_gmail(self, data: dict) -> dict:
+        import smtplib
+        import ssl
+        from email.message import EmailMessage
+        from email.utils import formataddr, make_msgid
+
+        host = self.env.get("SMTP_HOST", "smtp.gmail.com")
+        port = int(self.env.get("SMTP_PORT", "587"))
+        user = self.env["SMTP_USER"]
+        password = self.env["SMTP_PASSWORD"]
+        from_name = self.env.get("SMTP_FROM_NAME", "ELEXITY 34")
+        from_email = self.env.get("SMTP_FROM_EMAIL", user)
+
+        msg = EmailMessage()
+        msg["From"] = formataddr((from_name, from_email))
+        msg["To"] = data["to"]
+        msg["Subject"] = data["subject"]
+        msg["Message-ID"] = make_msgid(domain=from_email.split("@", 1)[-1])
+        if data.get("cc"):
+            msg["Cc"] = data["cc"]
+        body_text = data.get("body_text") or "Votre client mail ne supporte pas le HTML."
+        msg.set_content(body_text)
+        msg.add_alternative(data["body_html"], subtype="html")
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP(host, port, timeout=20) as smtp:
+            smtp.starttls(context=context)
+            smtp.login(user, password)
+            smtp.send_message(msg)
+
+        return {"message_id": msg["Message-ID"], "to": data["to"]}
+
+    def _tool_send_whatsapp_message(self, data: dict) -> dict:
+        token = self.env["WHATSAPP_ACCESS_TOKEN"]
+        phone_id = self.env["WHATSAPP_PHONE_NUMBER_ID"]
+        version = self.env.get("WHATSAPP_API_VERSION", "v21.0")
+
+        normalized = data["to_number"].lstrip("+").replace(" ", "").replace("-", "")
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": normalized,
+            "type": "text",
+            "text": {"preview_url": False, "body": data["body"]},
+        }
+        resp = httpx.post(
+            f"https://graph.facebook.com/{version}/{phone_id}/messages",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"},
+            json=payload, timeout=20,
+        )
+        if resp.status_code >= 400:
+            body_err = resp.json() if resp.content else {}
+            err = body_err.get("error", {})
+            return {"error": err.get("message", f"HTTP {resp.status_code}"),
+                    "code": err.get("code"),
+                    "hint": ("Fenetre 24h fermee : utiliser un template "
+                             "(send_whatsapp_template)") if err.get("code") in (131047, 131051) else None}
+        msgs = resp.json().get("messages") or []
+        return {"wamid": msgs[0]["id"] if msgs else None}
+
+    def _tool_send_whatsapp_template(self, data: dict) -> dict:
+        token = self.env["WHATSAPP_ACCESS_TOKEN"]
+        phone_id = self.env["WHATSAPP_PHONE_NUMBER_ID"]
+        version = self.env.get("WHATSAPP_API_VERSION", "v21.0")
+
+        normalized = data["to_number"].lstrip("+").replace(" ", "").replace("-", "")
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": normalized,
+            "type": "template",
+            "template": {
+                "name": data["template_name"],
+                "language": {"code": data.get("language", "fr")},
+            },
+        }
+        resp = httpx.post(
+            f"https://graph.facebook.com/{version}/{phone_id}/messages",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"},
+            json=payload, timeout=20,
+        )
+        if resp.status_code >= 400:
+            body_err = resp.json() if resp.content else {}
+            err = body_err.get("error", {})
+            return {"error": err.get("message", f"HTTP {resp.status_code}"),
+                    "code": err.get("code")}
+        msgs = resp.json().get("messages") or []
+        return {"wamid": msgs[0]["id"] if msgs else None}

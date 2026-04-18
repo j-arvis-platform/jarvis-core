@@ -27,7 +27,7 @@ if hasattr(sys.stdout, "buffer"):
 TENANT_ENV = ROOT.parent / "tenant-configs" / "tenant-elexity34" / ".env"
 load_dotenv(TENANT_ENV)
 
-PROMPT = (
+PROMPT = os.environ.get("TEST_PROMPT") or (
     "Crée un contact test dans Supabase : Mme Testouille (prenom: Alice), "
     "email alice.testouille@test-jarvis.fr, telephone 0600000000, "
     "adresse 1 rue du Test 34150 Gignac, type prospect, source 'test-j3-tools'. "
