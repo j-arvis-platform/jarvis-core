@@ -48,6 +48,11 @@ Items identifiés pendant le build V2, à traiter après go-live (lundi 20 avril
   - **Timing :** semaine 2 post go-live V2.
   - **Priorité :** HIGH.
 
+## Confort dev (LOW priorité)
+
+- [ ] **Claude Code Channels — bridge Telegram/Discord/iMessage**
+  Permet à Hamid de piloter Claude Code (l'outil de dev) à distance depuis son mobile en envoyant des messages à un bot dédié. Purement confort dev, aucun impact sur le runtime agent. Setup : lancer Claude Code avec `--channels` + configurer bot Telegram dédié. Détails : `docs/CLAUDE-CODE-CHANNELS-EVAL.md`.
+
 ## MCPs différés
 
 - [ ] `PAPPERS_API_KEY` — inscription pappers.fr/api
