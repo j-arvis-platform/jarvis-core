@@ -17,6 +17,8 @@ from agent.core.config import load_tenant_config, load_personas
 from agent.core.supabase_client import get_supabase, insert_row, query_table
 from agent.integrations.email import EmailClient
 from agent.integrations.email import build_from_env as build_email_from_env
+from agent.integrations.sms import TwilioSMSClient
+from agent.integrations.sms import build_from_env as build_sms_from_env
 from agent.integrations.telegram import TelegramBot, TelegramError
 from agent.integrations.telegram import build_from_env as build_telegram_from_env
 from agent.routing.model_router import get_model, classify_complexity
@@ -110,6 +112,7 @@ class JarvisAgent:
         self.conversation: list[dict] = []
         self._telegram: TelegramBot | None = None
         self._email: EmailClient | None = None
+        self._sms: TwilioSMSClient | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
 
     @property
@@ -144,6 +147,31 @@ class JarvisAgent:
             )
         except Exception as e:
             logger.error(f"send_email: échec SMTP — {e}")
+            return {}
+
+    @property
+    def sms(self) -> TwilioSMSClient:
+        """Lazy-init du wrapper Twilio SMS (si TWILIO_* définis)."""
+        if self._sms is None:
+            self._sms = build_sms_from_env()
+        return self._sms
+
+    def send_sms(self, to_number: str, body: str,
+                 urgence: bool = False) -> dict:
+        """Envoie un SMS. Blocking wrapper autour de l'API async.
+
+        V1 anti-spam rule : max 1 SMS/numéro/24h (bypass si urgence=True) —
+        à cabler via Supabase `rate_limit_sms` post go-live.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(
+                self.sms.send_sms(to_number=to_number, body=body,
+                                  urgence=urgence)
+            )
+        except Exception as e:
+            logger.error(f"send_sms: échec Twilio — {e}")
             return {}
 
     def notify_admin(self, message: str, parse_mode: str | None = "HTML") -> dict:

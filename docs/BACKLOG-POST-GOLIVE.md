@@ -33,6 +33,21 @@ Items identifiés pendant le build V2, à traiter après go-live (lundi 20 avril
 - [ ] **Audit complet VPS V1 avant décommissionnement**
   Avant de couper VPS V1, vérifier qu'aucun service n'est oublié (cf. `external/v1-rescue/secrets/raw-vps-v1-audit.txt` : 42 services systemd + 12 containers Docker).
 
+## Email délivrabilité
+
+- [ ] **[HIGH] Configurer SPF / DKIM / DMARC pour `elexity34.fr`**
+  - **Cause :** envoi SMTP via Gmail Workspace classé en spam sur certaines boîtes neuves/strictes (confirmé 18/04 sur `admin@j-arvis.ai`). Réputation email = commercial critique.
+  - **Actions :**
+    1. Se connecter au DNS Squarespace (propriétaire de `elexity34.fr`).
+    2. Ajouter SPF : `v=spf1 include:_spf.google.com ~all`
+    3. Activer DKIM dans Google Admin Console → copier la clé DNS → coller dans Squarespace.
+    4. Ajouter DMARC : `v=DMARC1; p=quarantine; rua=mailto:admin@j-arvis.ai`
+    5. Attendre 24-48 h de propagation DNS.
+    6. Tester via [mail-tester.com](https://www.mail-tester.com/) (viser 10/10).
+  - **Durée :** 30 min de setup + 48 h propagation.
+  - **Timing :** semaine 2 post go-live V2.
+  - **Priorité :** HIGH.
+
 ## MCPs différés
 
 - [ ] `PAPPERS_API_KEY` — inscription pappers.fr/api
