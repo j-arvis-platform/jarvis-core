@@ -28,6 +28,7 @@ from agent.integrations.vapi import build_from_env as build_vapi_from_env
 from agent.integrations.whatsapp import WhatsAppClient
 from agent.integrations.whatsapp import build_from_env as build_whatsapp_from_env
 from agent.routing.model_router import get_model, classify_complexity
+from agent.tools.registry import TOOLS_SCHEMA, ToolExecutor
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -45,15 +46,43 @@ selon le domaine de la question, mais tu restes toujours Jarvis.
 ## Personas narratives (style, pas entités)
 {personas_block}
 
+## Outils à ta disposition
+
+Tu as accès à des outils concrets qui agissent sur les systèmes réels du
+tenant. Utilise-les au lieu de dire "je n'ai pas accès" — tu as bien accès.
+
+Supabase (base de données du tenant) :
+- `supabase_create_contact` — créer un contact (prospect/client/fournisseur)
+- `supabase_create_projet` — créer un projet lié à un contact
+- `supabase_create_tache` — créer une tâche (humaine ou Jarvis)
+- `supabase_query_table` — lire des lignes avec filtres simples
+
+Invoice Ninja (facturation) :
+- `ninja_search_client` — vérifier si le client existe déjà
+- `ninja_create_client` — créer un nouveau client de facturation
+- `ninja_create_quote` — créer un brouillon de devis
+
+Communication :
+- `notify_admin_telegram` — envoyer un message Telegram à Hamid
+
+## Règles d'emploi des outils
+
+1. Avant toute action engageante (création de contact / projet / devis),
+   vérifie l'existant avec `supabase_query_table` ou `ninja_search_client`.
+2. Quand tu crées des ressources liées, passe bien les UUIDs retournés
+   (`contact_id` pour `supabase_create_projet`, etc.).
+3. Si un outil échoue, explique l'erreur à l'humain et propose une solution.
+4. Après une création importante, mentionne l'id / référence dans ta réponse.
+
 ## Règles absolues
+
 1. Tu ES Jarvis. Pas de "je vais transférer à Hugo" — c'est toi qui réponds.
-2. Si un client demande "passer à Hugo", tu réponds naturellement en mode compta.
-3. Adapte ton style (chaleureux pour commercial, technique pour terrain, etc.)
-   mais JAMAIS de rupture d'identité.
-4. Langue : français, sauf si le contexte exige l'anglais.
-5. Si tu ne sais pas, dis-le. Ne fabrique jamais de données.
-6. Pour toute action engageante (devis, email client, publication), demande
-   validation à l'humain via la file humaine.
+2. Adapte ton style (chaleureux commercial, technique terrain, etc.) mais
+   jamais de rupture d'identité.
+3. Langue : français, sauf si le contexte exige l'anglais.
+4. Si tu ne sais pas, dis-le. Ne fabrique jamais de données.
+5. Pour les décisions stratégiques (choix commerciaux, tarifs, validation
+   client), passe par `supabase_create_tache` avec assignee=hamid.
 
 ## Données entreprise
 {tenant_block}
@@ -122,7 +151,14 @@ class JarvisAgent:
         self._whatsapp: WhatsAppClient | None = None
         self._vapi: VapiClient | None = None
         self._legifrance: LegifranceClient | None = None
+        self._tool_executor: ToolExecutor | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
+
+    @property
+    def tool_executor(self) -> ToolExecutor:
+        if self._tool_executor is None:
+            self._tool_executor = ToolExecutor()
+        return self._tool_executor
 
     @property
     def telegram(self) -> TelegramBot:
@@ -289,30 +325,82 @@ class JarvisAgent:
             logger.error(f"notify_admin: erreur inattendue — {e}")
             return {}
 
-    def respond(self, user_message: str) -> str:
-        """Traite un message utilisateur et retourne la réponse de Jarvis."""
+    def respond(self, user_message: str, max_tool_rounds: int = 8,
+                use_tools: bool = True) -> str:
+        """Traite un message utilisateur et retourne la réponse de Jarvis.
+
+        Boucle agentic : Claude peut appeler des tools (Supabase, Invoice Ninja,
+        Telegram...) et reçoit les résultats avant de formuler sa réponse finale.
+        """
         model = get_model(user_message)
         complexity = classify_complexity(user_message)
-        logger.info(f"Message reçu — complexité: {complexity.value}, modèle: {model}")
+        logger.info(f"Message reçu — complexité: {complexity.value}, modèle: {model}, tools={use_tools}")
 
         self.conversation.append({"role": "user", "content": user_message})
 
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=self.system_prompt,
-            messages=self.conversation,
-        )
+        total_in = 0
+        total_out = 0
+        rounds = 0
+        final_text = ""
 
-        assistant_message = response.content[0].text
-        self.conversation.append({"role": "assistant", "content": assistant_message})
+        while True:
+            rounds += 1
+            kwargs = dict(
+                model=model,
+                max_tokens=4096,
+                system=self.system_prompt,
+                messages=self.conversation,
+            )
+            if use_tools:
+                kwargs["tools"] = TOOLS_SCHEMA
+
+            response = client.messages.create(**kwargs)
+            total_in += response.usage.input_tokens
+            total_out += response.usage.output_tokens
+
+            # Parse response blocks
+            tool_results = []
+            final_text = ""
+            for block in response.content:
+                if block.type == "text":
+                    final_text += block.text
+                elif block.type == "tool_use":
+                    name = block.name
+                    tool_input = block.input or {}
+                    tool_id = block.id
+                    logger.info(f"tool_use name={name} input={json.dumps(tool_input, ensure_ascii=False)[:160]}")
+                    result = self.tool_executor.execute(name, tool_input)
+                    result_str = json.dumps(result, ensure_ascii=False, default=str)
+                    is_err = isinstance(result, dict) and "error" in result
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": result_str[:4000],
+                        **({"is_error": True} if is_err else {}),
+                    })
+
+            if response.stop_reason != "tool_use" or not tool_results:
+                # Cloture : on enregistre la reponse finale
+                self.conversation.append({"role": "assistant",
+                                           "content": response.content})
+                break
+
+            # Relance avec les resultats
+            self.conversation.append({"role": "assistant",
+                                       "content": response.content})
+            self.conversation.append({"role": "user",
+                                       "content": tool_results})
+
+            if rounds >= max_tool_rounds:
+                logger.warning("respond: max_tool_rounds atteint (%d)",
+                               max_tool_rounds)
+                final_text += "\n\n(limite de rounds outils atteinte)"
+                break
 
         logger.info(
-            f"Réponse générée — {response.usage.input_tokens} in / "
-            f"{response.usage.output_tokens} out tokens"
+            f"Réponse générée — {rounds} rounds, {total_in} in / {total_out} out tokens"
         )
-
-        return assistant_message
+        return final_text or "(pas de réponse textuelle)"
 
     def add_to_human_queue(self, context: dict, proposition: str,
                            urgence: str = "normale") -> dict:
