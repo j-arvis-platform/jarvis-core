@@ -15,7 +15,10 @@ from dotenv import load_dotenv
 
 from agent.core.config import load_tenant_config, load_personas
 from agent.core.supabase_client import get_supabase, insert_row, query_table
-from agent.integrations.telegram import TelegramBot, TelegramError, build_from_env
+from agent.integrations.email import EmailClient
+from agent.integrations.email import build_from_env as build_email_from_env
+from agent.integrations.telegram import TelegramBot, TelegramError
+from agent.integrations.telegram import build_from_env as build_telegram_from_env
 from agent.routing.model_router import get_model, classify_complexity
 
 load_dotenv()
@@ -106,14 +109,42 @@ class JarvisAgent:
         self.system_prompt = build_system_prompt(tenant_id)
         self.conversation: list[dict] = []
         self._telegram: TelegramBot | None = None
+        self._email: EmailClient | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
 
     @property
     def telegram(self) -> TelegramBot:
         """Lazy-init du wrapper Telegram (si TELEGRAM_BOT_TOKEN_JARVIS défini)."""
         if self._telegram is None:
-            self._telegram = build_from_env()
+            self._telegram = build_telegram_from_env()
         return self._telegram
+
+    @property
+    def email(self) -> EmailClient:
+        """Lazy-init du wrapper Email SMTP (si SMTP_* définis)."""
+        if self._email is None:
+            self._email = build_email_from_env()
+        return self._email
+
+    def send_email(self, to, subject: str, body_html: str,
+                   body_text: str | None = None, **kwargs) -> dict:
+        """Envoie un email transactionnel. Blocking wrapper autour de l'API async.
+
+        V1 anti-spam rule : max 1 email par client par 24h — à appliquer au
+        niveau skill (pas ici), via table Supabase `rate_limit_email` à venir.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(
+                self.email.send_email(
+                    to=to, subject=subject, body_html=body_html,
+                    body_text=body_text, **kwargs,
+                )
+            )
+        except Exception as e:
+            logger.error(f"send_email: échec SMTP — {e}")
+            return {}
 
     def notify_admin(self, message: str, parse_mode: str | None = "HTML") -> dict:
         """Envoie une notification Telegram à l'admin (Hamid).
