@@ -15,10 +15,12 @@ from dotenv import load_dotenv
 
 from agent.core.config import load_tenant_config, load_personas
 from agent.core.supabase_client import get_supabase, insert_row, query_table
+from agent.integrations.telegram import TelegramBot, TelegramError, build_from_env
 from agent.routing.model_router import get_model, classify_complexity
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("jarvis")
 
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -103,7 +105,34 @@ class JarvisAgent:
         self.tenant_id = tenant_id
         self.system_prompt = build_system_prompt(tenant_id)
         self.conversation: list[dict] = []
+        self._telegram: TelegramBot | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
+
+    @property
+    def telegram(self) -> TelegramBot:
+        """Lazy-init du wrapper Telegram (si TELEGRAM_BOT_TOKEN_JARVIS défini)."""
+        if self._telegram is None:
+            self._telegram = build_from_env()
+        return self._telegram
+
+    def notify_admin(self, message: str, parse_mode: str | None = "HTML") -> dict:
+        """Envoie une notification Telegram à l'admin (Hamid).
+
+        Blocking wrapper autour de l'API async de TelegramBot.
+        Swallow-and-log en cas d'erreur pour ne pas casser le flow agent.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(
+                self.telegram.send_message(message, parse_mode=parse_mode)
+            )
+        except TelegramError as e:
+            logger.error(f"notify_admin: échec Telegram — {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"notify_admin: erreur inattendue — {e}")
+            return {}
 
     def respond(self, user_message: str) -> str:
         """Traite un message utilisateur et retourne la réponse de Jarvis."""
