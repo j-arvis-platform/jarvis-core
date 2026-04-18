@@ -21,6 +21,8 @@ from agent.integrations.sms import TwilioSMSClient
 from agent.integrations.sms import build_from_env as build_sms_from_env
 from agent.integrations.telegram import TelegramBot, TelegramError
 from agent.integrations.telegram import build_from_env as build_telegram_from_env
+from agent.integrations.vapi import VapiClient
+from agent.integrations.vapi import build_from_env as build_vapi_from_env
 from agent.integrations.whatsapp import WhatsAppClient
 from agent.integrations.whatsapp import build_from_env as build_whatsapp_from_env
 from agent.routing.model_router import get_model, classify_complexity
@@ -116,6 +118,7 @@ class JarvisAgent:
         self._email: EmailClient | None = None
         self._sms: TwilioSMSClient | None = None
         self._whatsapp: WhatsAppClient | None = None
+        self._vapi: VapiClient | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
 
     @property
@@ -218,6 +221,43 @@ class JarvisAgent:
             )
         except Exception as e:
             logger.error(f"send_whatsapp_template: échec Meta — {e}")
+            return {}
+
+    @property
+    def vapi(self) -> VapiClient:
+        """Lazy-init du client Vapi (si VAPI_API_KEY défini)."""
+        if self._vapi is None:
+            self._vapi = build_vapi_from_env()
+        return self._vapi
+
+    def initiate_vapi_call(self, customer_number: str,
+                           assistant_id: str | None = None,
+                           phone_number_id: str | None = None,
+                           metadata: dict | None = None) -> dict:
+        """Initie un appel sortant Vapi. Blocking wrapper.
+
+        Si assistant_id ou phone_number_id non passés, on tire depuis l'env
+        (VAPI_ASSISTANT_ID_AXEL, VAPI_PHONE_NUMBER_ID).
+        """
+        import asyncio
+
+        assistant_id = assistant_id or os.environ.get("VAPI_ASSISTANT_ID_AXEL")
+        phone_number_id = phone_number_id or os.environ.get("VAPI_PHONE_NUMBER_ID")
+        if not assistant_id:
+            logger.error("initiate_vapi_call: VAPI_ASSISTANT_ID_AXEL manquant")
+            return {}
+
+        try:
+            return asyncio.run(
+                self.vapi.create_outbound_call(
+                    assistant_id=assistant_id,
+                    customer_number=customer_number,
+                    phone_number_id=phone_number_id,
+                    metadata=metadata,
+                )
+            )
+        except Exception as e:
+            logger.error(f"initiate_vapi_call: échec Vapi — {e}")
             return {}
 
     def notify_admin(self, message: str, parse_mode: str | None = "HTML") -> dict:
