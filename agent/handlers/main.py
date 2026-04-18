@@ -21,6 +21,8 @@ from agent.integrations.sms import TwilioSMSClient
 from agent.integrations.sms import build_from_env as build_sms_from_env
 from agent.integrations.telegram import TelegramBot, TelegramError
 from agent.integrations.telegram import build_from_env as build_telegram_from_env
+from agent.integrations.whatsapp import WhatsAppClient
+from agent.integrations.whatsapp import build_from_env as build_whatsapp_from_env
 from agent.routing.model_router import get_model, classify_complexity
 
 load_dotenv()
@@ -113,6 +115,7 @@ class JarvisAgent:
         self._telegram: TelegramBot | None = None
         self._email: EmailClient | None = None
         self._sms: TwilioSMSClient | None = None
+        self._whatsapp: WhatsAppClient | None = None
         logger.info(f"Jarvis initialisé pour tenant: {tenant_id}")
 
     @property
@@ -172,6 +175,49 @@ class JarvisAgent:
             )
         except Exception as e:
             logger.error(f"send_sms: échec Twilio — {e}")
+            return {}
+
+    @property
+    def whatsapp(self) -> WhatsAppClient:
+        """Lazy-init du wrapper WhatsApp Business (si WHATSAPP_* définis)."""
+        if self._whatsapp is None:
+            self._whatsapp = build_whatsapp_from_env()
+        return self._whatsapp
+
+    def send_whatsapp(self, to_number: str, body: str) -> dict:
+        """Envoie un message WhatsApp texte. Blocking wrapper.
+
+        Requiert fenêtre 24h conversationnelle ouverte côté destinataire.
+        Pour envoi hors fenêtre : utiliser send_whatsapp_template().
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(
+                self.whatsapp.send_text_message(to_number=to_number, body=body)
+            )
+        except Exception as e:
+            logger.error(f"send_whatsapp: échec Meta — {e}")
+            return {}
+
+    def send_whatsapp_template(self, to_number: str, template_name: str,
+                               language_code: str = "fr",
+                               components: list | None = None) -> dict:
+        """Envoie un message template WhatsApp pré-approuvé par Meta.
+
+        Utiliser hors fenêtre 24h (notifications proactives).
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(
+                self.whatsapp.send_template_message(
+                    to_number=to_number, template_name=template_name,
+                    language_code=language_code, components=components,
+                )
+            )
+        except Exception as e:
+            logger.error(f"send_whatsapp_template: échec Meta — {e}")
             return {}
 
     def notify_admin(self, message: str, parse_mode: str | None = "HTML") -> dict:
