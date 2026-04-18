@@ -22,7 +22,7 @@ claude = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 NINJA_URL = os.environ["INVOICE_NINJA_URL"]
-NINJA_TOKEN = os.environ["INVOICE_NINJA_TOKEN"]
+NINJA_TOKEN = os.environ["INVOICE_NINJA_API_KEY"]
 
 sb_headers = {
     "apikey": SUPABASE_KEY,

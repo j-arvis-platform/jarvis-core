@@ -51,7 +51,7 @@ def test_supabase():
 # ── 2. Invoice Ninja ──
 def test_invoice_ninja():
     url = os.environ.get("INVOICE_NINJA_URL", "")
-    token = os.environ.get("INVOICE_NINJA_TOKEN", "")
+    token = os.environ.get("INVOICE_NINJA_API_KEY", "")
     if not url or not token or "A_REMPLIR" in token:
         return "SKIP", "Credentials manquants"
 
